@@ -16,7 +16,7 @@ jobs:
             set -e
             cd /io
             PY=/opt/python/cp36-cp36m/bin
-            $PY/pip install flake8==3.4.1 pyflakes==1.6.0 isort==4.2.15 docutils
+            $PY/pip install flake8==3.4.1 isort==4.2.15 docutils
             $PY/flake8 aiohttp --exclude=aiohttp/backport_cookies.py examples tests demos
             $PY/python -m isort -c -rc aiohttp tests examples
             $PY/python setup.py check -rms
@@ -26,20 +26,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run tests in manylinux1 for cp34/cp35/cp36
+      - name: Run tests in manylinux1 (cp36)
         run: |
           docker run --rm -v "$PWD":/io quay.io/pypa/manylinux1_x86_64 bash -c '
             set -e
             cd /io
-            for PY in cp34-cp34m cp35-cp35m cp36-cp36m; do
-              BIN=/opt/python/$PY/bin
-              $BIN/pip install -r requirements/ci-wheel.txt
-              $BIN/pip install -e .
-              echo "=== $PY no-extensions ==="
-              AIOHTTP_NO_EXTENSIONS=1 $BIN/py.test tests -q
-              echo "=== $PY asyncio-debug ==="
-              PYTHONASYNCIODEBUG=1 $BIN/py.test tests -q
-            done
+            BIN=/opt/python/cp36-cp36m/bin
+            $BIN/pip install -r requirements/ci-wheel.txt
+            $BIN/pip install -e .
+            echo "=== cp36 no-extensions ==="
+            AIOHTTP_NO_EXTENSIONS=1 $BIN/py.test tests -q
+            echo "=== cp36 asyncio-debug ==="
+            PYTHONASYNCIODEBUG=1 $BIN/py.test tests -q
           '
 
   sdist:
@@ -78,8 +76,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build manylinux1 wheels (${{ matrix.arch }})
+        env:
+          PYTHON_VERSIONS: cp36-cp36m
         run: |
-          docker run --rm -v "$PWD":/io "${{ matrix.image }}" ${{ matrix.pre }} /io/tools/build-wheels.sh aiohttp
+          docker run --rm -v "$PWD":/io -e PYTHON_VERSIONS "${{ matrix.image }}" ${{ matrix.pre }} /io/tools/build-wheels.sh aiohttp
       - name: List wheels
         run: ls -la dist
       - uses: actions/upload-artifact@v4
