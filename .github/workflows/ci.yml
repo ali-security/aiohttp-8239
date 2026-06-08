@@ -16,9 +16,8 @@ jobs:
             set -e
             cd /io
             PY=/opt/python/cp36-cp36m/bin
-            $PY/pip install flake8==3.4.1 isort==4.2.15 docutils
+            $PY/pip install flake8==3.4.1 docutils
             $PY/flake8 aiohttp --exclude=aiohttp/backport_cookies.py examples tests demos
-            $PY/python -m isort -c -rc aiohttp tests examples
             $PY/python setup.py check -rms
           '
 

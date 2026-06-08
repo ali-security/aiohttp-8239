@@ -25,7 +25,7 @@ echo
 echo "Compile wheels"
 for PYTHON in ${PYTHON_VERSIONS}; do
     /opt/python/${PYTHON}/bin/pip install -r /io/requirements/wheel.txt
-    /opt/python/${PYTHON}/bin/pip wheel /io/ -w /io/dist/
+    /opt/python/${PYTHON}/bin/pip wheel /io/ -w /io/dist/ --no-build-isolation
 done
 
 echo
