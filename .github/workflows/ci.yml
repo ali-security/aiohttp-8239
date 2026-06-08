@@ -62,3 +62,28 @@ jobs:
           name: dist-sdist
           path: dist/*.tar.gz
           if-no-files-found: error
+
+  linux-wheels:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: quay.io/pypa/manylinux1_x86_64
+            arch: x86_64
+            pre: ""
+          - image: quay.io/pypa/manylinux1_i686
+            arch: i686
+            pre: "linux32"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build manylinux1 wheels (${{ matrix.arch }})
+        run: |
+          docker run --rm -v "$PWD":/io "${{ matrix.image }}" ${{ matrix.pre }} /io/tools/build-wheels.sh aiohttp
+      - name: List wheels
+        run: ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-${{ matrix.arch }}
+          path: dist/*.whl
+          if-no-files-found: error
