@@ -1,0 +1,7 @@
+.git
+dist
+build
+*.so
+.serena
+docs/superpowers
+**/__pycache__
