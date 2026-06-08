@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint in manylinux1 (cp36, period-pinned tools)
+        run: |
+          docker run --rm -v "$PWD":/io quay.io/pypa/manylinux1_x86_64 bash -c '
+            set -e
+            cd /io
+            PY=/opt/python/cp36-cp36m/bin
+            $PY/pip install flake8==3.4.1 pyflakes==1.6.0 isort==4.2.15 docutils
+            $PY/flake8 aiohttp --exclude=aiohttp/backport_cookies.py examples tests demos
+            $PY/python -m isort -c -rc aiohttp tests examples
+            $PY/python setup.py check -rms
+          '
