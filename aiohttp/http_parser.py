@@ -23,6 +23,8 @@ try:
 except ImportError:  # pragma: no cover
     HAS_BROTLI = False
 
+DEFAULT_MAX_DECOMPRESS_SIZE = 2 ** 25  # 32 MiB — CVE-2025-69223
+
 
 __all__ = (
     'HttpParser', 'HttpRequestParser', 'HttpResponseParser',
@@ -606,11 +608,13 @@ class HttpPayloadParser:
 class DeflateBuffer:
     """DeflateStream decompress stream and feed data into specified stream."""
 
-    def __init__(self, out, encoding):
+    def __init__(self, out, encoding,
+                 max_decompress_size=DEFAULT_MAX_DECOMPRESS_SIZE):
         self.out = out
         self.size = 0
         self.encoding = encoding
         self._started_decoding = False
+        self._max_decompress_size = max_decompress_size
 
         if encoding == 'br':
             if not HAS_BROTLI:  # pragma: no cover
@@ -629,18 +633,29 @@ class DeflateBuffer:
     def feed_data(self, chunk, size):
         self.size += size
         try:
-            chunk = self.decompressor.decompress(chunk)
+            if self.encoding == 'br':
+                # brotlipy has no max_length; decompress then check size
+                chunk = self.decompressor.decompress(chunk)
+            else:
+                chunk = self.decompressor.decompress(
+                    chunk, self._max_decompress_size + 1)
         except Exception:
             if not self._started_decoding and self.encoding == 'deflate':
                 self.decompressor = zlib.decompressobj()
                 try:
-                    chunk = self.decompressor.decompress(chunk)
+                    chunk = self.decompressor.decompress(
+                        chunk, self._max_decompress_size + 1)
                 except Exception:
                     raise ContentEncodingError(
                         'Can not decode content-encoding: %s' % self.encoding)
             else:
                 raise ContentEncodingError(
                     'Can not decode content-encoding: %s' % self.encoding)
+
+        if len(chunk) > self._max_decompress_size:
+            raise ContentEncodingError(
+                'Decompressed data exceeds the configured limit of %d bytes'
+                % self._max_decompress_size)
 
         if chunk:
             self._started_decoding = True
