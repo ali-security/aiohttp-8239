@@ -63,64 +63,6 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
-  windows-wheels:
-    runs-on: windows-2022
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        pyver: ["3.4", "3.5", "3.6"]
-        arch: ["x86", "x64"]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.pyver }} (${{ matrix.arch }})
-        uses: MatteoH2O1999/setup-python@v6
-        with:
-          python-version: ${{ matrix.pyver }}
-          architecture: ${{ matrix.arch }}
-      - name: Build wheel
-        run: |
-          python -m pip install --upgrade "pip<21" "setuptools<45" "wheel<0.34" "cython==0.27.1"
-          python -m pip wheel . --no-deps -w dist
-          dir dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-windows-py${{ matrix.pyver }}-${{ matrix.arch }}
-          path: dist/*.whl
-          if-no-files-found: ignore
-
-  macos-wheels:
-    runs-on: macos-13
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - pyver: "3.4"
-            target: "10.10"
-          - pyver: "3.4"
-            target: "10.11"
-          - pyver: "3.6"
-            target: "10.10"
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.pyver }}
-        uses: MatteoH2O1999/setup-python@v6
-        with:
-          python-version: ${{ matrix.pyver }}
-      - name: Build wheel (target ${{ matrix.target }})
-        env:
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target }}
-        run: |
-          python -m pip install --upgrade "pip<21" "setuptools<45" "wheel<0.34" "cython==0.27.1"
-          python setup.py bdist_wheel --plat-name "macosx-${{ matrix.target }}-x86_64" --dist-dir dist
-          ls -la dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-macos-py${{ matrix.pyver }}-${{ matrix.target }}
-          path: dist/*.whl
-          if-no-files-found: ignore
-
   linux-wheels:
     runs-on: ubuntu-latest
     strategy:
@@ -145,3 +87,23 @@ jobs:
           name: dist-linux-${{ matrix.arch }}
           path: dist/*.whl
           if-no-files-found: error
+
+  collect:
+    needs: [sdist, linux-wheels]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all per-job artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: all
+          merge-multiple: true
+      - name: List everything collected
+        run: ls -la all || echo "nothing built"
+      - name: Upload consolidated dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: all/*
+          if-no-files-found: warn
