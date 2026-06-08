@@ -18,10 +18,26 @@ from .streams import EMPTY_PAYLOAD, FlowControlStreamReader
 
 
 try:
-    import brotli
-    HAS_BROTLI = True
+    import brotli as _brotli
 except ImportError:  # pragma: no cover
-    HAS_BROTLI = False
+    _brotli = None
+
+HAS_BROTLI = _brotli is not None
+
+
+def _brotli_has_max_length_cap(mod):
+    try:
+        return tuple(int(p) for p in mod.__version__.split('.')[:2]) >= (1, 2)
+    except Exception:  # pragma: no cover
+        return False
+
+
+if _brotli is not None and not _brotli_has_max_length_cap(_brotli):
+    from ._vendored import brotli as _brotli_decompressor
+else:
+    _brotli_decompressor = _brotli
+
+DEFAULT_MAX_DECOMPRESS_SIZE = 2 ** 25
 
 
 __all__ = (
@@ -606,18 +622,20 @@ class HttpPayloadParser:
 class DeflateBuffer:
     """DeflateStream decompress stream and feed data into specified stream."""
 
-    def __init__(self, out, encoding):
+    def __init__(self, out, encoding,
+                 max_decompress_size=DEFAULT_MAX_DECOMPRESS_SIZE):
         self.out = out
         self.size = 0
         self.encoding = encoding
         self._started_decoding = False
+        self._max_decompress_size = max_decompress_size
 
         if encoding == 'br':
             if not HAS_BROTLI:  # pragma: no cover
                 raise ContentEncodingError(
                     'Can not decode content-encoding: brotli (br). '
                     'Please install `brotlipy`')
-            self.decompressor = brotli.Decompressor()
+            self.decompressor = _brotli_decompressor.Decompressor()
         else:
             zlib_mode = (16 + zlib.MAX_WBITS
                          if encoding == 'gzip' else -zlib.MAX_WBITS)
@@ -626,15 +644,21 @@ class DeflateBuffer:
     def set_exception(self, exc):
         self.out.set_exception(exc)
 
+    def _decompress(self, chunk):
+        max_length = self._max_decompress_size + 1
+        if hasattr(self.decompressor, 'decompress'):
+            return self.decompressor.decompress(chunk, max_length)
+        return self.decompressor.process(chunk, max_length)
+
     def feed_data(self, chunk, size):
         self.size += size
         try:
-            chunk = self.decompressor.decompress(chunk)
+            chunk = self._decompress(chunk)
         except Exception:
             if not self._started_decoding and self.encoding == 'deflate':
                 self.decompressor = zlib.decompressobj()
                 try:
-                    chunk = self.decompressor.decompress(chunk)
+                    chunk = self._decompress(chunk)
                 except Exception:
                     raise ContentEncodingError(
                         'Can not decode content-encoding: %s' % self.encoding)
@@ -642,12 +666,20 @@ class DeflateBuffer:
                 raise ContentEncodingError(
                     'Can not decode content-encoding: %s' % self.encoding)
 
+        if len(chunk) > self._max_decompress_size:
+            raise ContentEncodingError(
+                'Decompressed data exceeds the configured limit of %d bytes'
+                % self._max_decompress_size)
+
         if chunk:
             self._started_decoding = True
             self.out.feed_data(chunk, len(chunk))
 
     def feed_eof(self):
-        chunk = self.decompressor.flush()
+        if hasattr(self.decompressor, 'flush'):
+            chunk = self.decompressor.flush()
+        else:
+            chunk = b''
 
         if chunk or self.size > 0:
             self.out.feed_data(chunk, len(chunk))

@@ -20,6 +20,11 @@ try:
 except ImportError:
     brotli = None
 
+try:
+    from aiohttp._vendored import brotli as vendored_brotli
+except ImportError:
+    vendored_brotli = None
+
 
 REQUEST_PARSERS = [HttpRequestParserPy]
 RESPONSE_PARSERS = [HttpResponseParserPy]
@@ -793,3 +798,74 @@ class TestDeflateBuffer(unittest.TestCase):
         dbuf.feed_eof()
 
         self.assertTrue(buf.at_eof())
+
+    def test_deflate_bomb_is_capped(self):
+        bomb = zlib.compress(b'A' * (4 * 2 ** 20))
+        self.assertLess(len(bomb), 2 ** 16)
+
+        buf = aiohttp.FlowControlDataQueue(self.stream)
+        dbuf = DeflateBuffer(buf, 'deflate', max_decompress_size=1024)
+
+        self.assertRaises(
+            http_exceptions.ContentEncodingError,
+            dbuf.feed_data, bomb, len(bomb))
+
+    @pytest.mark.skipif(
+        vendored_brotli is None, reason="vendored brotli is not built")
+    def test_brotli_bomb_is_capped(self):
+        bomb = vendored_brotli.compress(b'A' * (16 * 2 ** 20))
+        self.assertLess(len(bomb), 2 ** 16)
+
+        buf = aiohttp.FlowControlDataQueue(self.stream)
+        dbuf = DeflateBuffer(buf, 'br', max_decompress_size=1024)
+
+        self.assertRaises(
+            http_exceptions.ContentEncodingError,
+            dbuf.feed_data, bomb, len(bomb))
+
+    @pytest.mark.skipif(
+        vendored_brotli is None, reason="vendored brotli is not built")
+    def test_vendored_brotli_output_buffer_limit(self):
+        original_size = 16 * 2 ** 20
+        bomb = vendored_brotli.compress(b'A' * original_size)
+        out = vendored_brotli.Decompressor().process(
+            bomb, output_buffer_limit=1024 + 1)
+        self.assertGreaterEqual(len(out), 1025)
+        self.assertLess(len(out), 1024 + 2 ** 16)
+        self.assertLess(len(out), original_size)
+
+    @pytest.mark.skipif(
+        vendored_brotli is None, reason="vendored brotli is not built")
+    def test_streaming_brotli_payload_roundtrips(self):
+        original = b'brotli payload ' * 4096
+        compressed = vendored_brotli.compress(original)
+
+        buf = aiohttp.FlowControlDataQueue(self.stream)
+        dbuf = DeflateBuffer(buf, 'br')
+
+        chunk_size = 1024
+        for i in range(0, len(compressed), chunk_size):
+            chunk = compressed[i:i + chunk_size]
+            dbuf.feed_data(chunk, len(chunk))
+        dbuf.feed_eof()
+
+        result = b''.join(d for d, _ in buf._buffer)
+        self.assertEqual(result, original)
+
+
+@pytest.mark.parametrize('chunk_size', [1024, 2 ** 14, 2 ** 16],
+                         ids=['1KB', '16KB', '64KB'])
+def test_streaming_decompress_large_payload(chunk_size):
+    original = b'A' * (3 * 2 ** 20)
+    compressed = zlib.compress(original)
+
+    buf = aiohttp.FlowControlDataQueue(mock.Mock())
+    dbuf = DeflateBuffer(buf, 'deflate')
+
+    for i in range(0, len(compressed), chunk_size):
+        chunk = compressed[i:i + chunk_size]
+        dbuf.feed_data(chunk, len(chunk))
+    dbuf.feed_eof()
+
+    result = b''.join(d for d, _ in buf._buffer)
+    assert result == original
