@@ -41,3 +41,24 @@ jobs:
               PYTHONASYNCIODEBUG=1 $BIN/py.test tests -q
             done
           '
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist in manylinux1 (cp36 + cython)
+        run: |
+          docker run --rm -v "$PWD":/io quay.io/pypa/manylinux1_x86_64 bash -c '
+            set -e
+            cd /io
+            PY=/opt/python/cp36-cp36m/bin
+            $PY/pip install cython==0.27.1
+            $PY/python setup.py sdist
+          '
+      - name: List sdist
+        run: ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
