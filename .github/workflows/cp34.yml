@@ -1,0 +1,199 @@
+name: cp34-macos-spike
+on:
+  push:
+    branches: [spike/macos-cp34-src]
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "10.10"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout (spike branch tree)
+        uses: actions/checkout@v4
+
+      - name: Env dump
+        run: |
+          set -x
+          uname -a
+          sw_vers || true
+          xcodebuild -version || true
+          clang --version
+          /usr/bin/clang --version
+          sysctl -n machdep.cpu.brand_string || true
+          which python3 /usr/bin/python3 || true
+          /usr/bin/python3 --version || true
+          echo "--- brew pythons / openssl ---"
+          brew --version || true
+          ls /usr/local/opt 2>/dev/null | grep -i -E 'openssl|python' || true
+          echo "--- pyenv present? ---"
+          which pyenv || true
+          echo "--- SDK ---"
+          xcrun --show-sdk-path || true
+          xcrun --show-sdk-version || true
+
+      - name: Install pyenv
+        run: |
+          set -x
+          brew install pyenv || brew upgrade pyenv || true
+          pyenv --version
+
+      - name: Try pyenv install 3.4.10
+        id: pyenv34
+        continue-on-error: true
+        run: |
+          set -x
+          export PYENV_ROOT="$HOME/.pyenv"
+          export PATH="$PYENV_ROOT/bin:$PATH"
+          eval "$(pyenv init - 2>/dev/null || true)"
+          # demote clang-17 hard errors that break old CPython configure/build
+          export CFLAGS="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
+          export CPPFLAGS="$CFLAGS"
+          # build x86_64 only, no SSL dependence
+          export PYTHON_CONFIGURE_OPTS="--enable-shared"
+          # capture full build log
+          set +e
+          pyenv install -v 3.4.10 2>&1 | tee /tmp/pyenv-3410.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "pyenv_rc=$rc" >> "$GITHUB_OUTPUT"
+          tail -200 /tmp/pyenv-3410.log || true
+          if [ "$rc" = "0" ]; then
+            "$PYENV_ROOT/versions/3.4.10/bin/python3.4" -c "import sys; print('PYENV PY OK', sys.version)" || rc=99
+          fi
+          echo "final_rc=$rc"
+          exit 0
+
+      - name: Raw from-source build (fallback if pyenv failed)
+        id: rawbuild
+        if: steps.pyenv34.outputs.pyenv_rc != '0'
+        continue-on-error: true
+        run: |
+          set -x
+          cd /tmp
+          curl -sSLO https://www.python.org/ftp/python/3.4.10/Python-3.4.10.tgz
+          tar xzf Python-3.4.10.tgz
+          cd Python-3.4.10
+          export CFLAGS="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types -arch x86_64"
+          export CPPFLAGS="$CFLAGS"
+          export LDFLAGS="-arch x86_64"
+          set +e
+          ./configure --prefix=/tmp/py34 --enable-shared 2>&1 | tee /tmp/raw-configure.log
+          crc=${PIPESTATUS[0]}
+          echo "configure_rc=$crc"
+          make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee /tmp/raw-make.log
+          mrc=${PIPESTATUS[0]}
+          echo "make_rc=$mrc"
+          make install 2>&1 | tee /tmp/raw-install.log
+          irc=${PIPESTATUS[0]}
+          echo "install_rc=$irc"
+          set -e
+          /tmp/py34/bin/python3.4 -c "import sys; print('RAW PY OK', sys.version)" || true
+          echo "raw_ok=$?" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Locate built python3.4
+        id: findpy
+        run: |
+          set -x
+          PY=""
+          if [ -x "$HOME/.pyenv/versions/3.4.10/bin/python3.4" ]; then
+            PY="$HOME/.pyenv/versions/3.4.10/bin/python3.4"
+          elif [ -x /tmp/py34/bin/python3.4 ]; then
+            PY=/tmp/py34/bin/python3.4
+          fi
+          echo "PY=$PY"
+          echo "py=$PY" >> "$GITHUB_OUTPUT"
+          if [ -z "$PY" ]; then
+            echo "NO PYTHON 3.4 BUILT — stopping before wheel build"
+            exit 0
+          fi
+          "$PY" -c "import sys,platform; print(sys.version); print(platform.machine())"
+          file "$PY" || true
+
+      - name: Pre-fetch build deps (no TLS via python pip)
+        if: steps.findpy.outputs.py != ''
+        run: |
+          set -x
+          mkdir -p /tmp/wh
+          cd /tmp/wh
+          curl -sSLO https://files.pythonhosted.org/packages/6b/6a/fa8d20fb8b661854a7140e290c52693ab3e8afdc9a8a7bf1194d9a227918/Cython-0.27.1-cp34-cp34m-macosx_10_6_intel.macosx_10_9_intel.macosx_10_9_x86_64.macosx_10_10_intel.macosx_10_10_x86_64.whl
+          curl -sSLO https://files.pythonhosted.org/packages/91/af/18d58ed8a8e7e6b91d71b0367034faf8ea41e1004018811388ed07a7f2d6/setuptools-43.0.0-py2.py3-none-any.whl
+          curl -sSLO https://files.pythonhosted.org/packages/0c/80/16a85b47702a1f47a63c104c91abdd0a6704ee8ae3b4ce4afc49bc39f9d9/wheel-0.30.0-py2.py3-none-any.whl
+          curl -sSLO https://files.pythonhosted.org/packages/5c/e0/be401c003291b56efc55aeba6a80ab790d3d4cece2778288d65323009420/pip-19.1.1-py2.py3-none-any.whl
+          ls -la
+
+      - name: Install build deps into site-packages (no pip/TLS)
+        id: deps
+        if: steps.findpy.outputs.py != ''
+        continue-on-error: true
+        run: |
+          set -x
+          PY="${{ steps.findpy.outputs.py }}"
+          SP="$("$PY" -c 'import site; print(site.getsitepackages()[0])')"
+          echo "site-packages: $SP"
+          cd /tmp/wh
+          for w in *.whl; do
+            "$PY" -m zipfile -e "$w" "$SP" || unzip -o "$w" -d "$SP"
+          done
+          "$PY" -c "import Cython; print('Cython', Cython.__version__)"
+          "$PY" -c "import setuptools; print('setuptools', setuptools.__version__)"
+          "$PY" -c "import wheel; print('wheel', wheel.__version__)"
+
+      - name: Build aiohttp wheel
+        id: wheel
+        if: steps.findpy.outputs.py != ''
+        continue-on-error: true
+        run: |
+          set -x
+          PY="${{ steps.findpy.outputs.py }}"
+          export CFLAGS="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
+          export ARCHFLAGS="-arch x86_64"
+          export MACOSX_DEPLOYMENT_TARGET=10.10
+          set +e
+          "$PY" setup.py bdist_wheel -d "$GITHUB_WORKSPACE/wheelhouse" 2>&1 | tee /tmp/wheel-build.log
+          wrc=${PIPESTATUS[0]}
+          set -e
+          echo "wheel_rc=$wrc"
+          ls -la "$GITHUB_WORKSPACE/wheelhouse" || true
+          exit 0
+
+      - name: Verify wheel contains _brotli .so and it loads
+        id: verify
+        if: steps.findpy.outputs.py != ''
+        continue-on-error: true
+        run: |
+          set -x
+          PY="${{ steps.findpy.outputs.py }}"
+          WHL=$(ls "$GITHUB_WORKSPACE"/wheelhouse/aiohttp-*.whl 2>/dev/null | head -1)
+          echo "WHL=$WHL"
+          [ -z "$WHL" ] && { echo "NO WHEEL"; exit 0; }
+          echo "=== wheel contents ==="
+          "$PY" -m zipfile -l "$WHL"
+          echo "=== brotli so present? ==="
+          "$PY" -m zipfile -l "$WHL" | grep -E '_vendored/_brotli.*\.so' && echo "BROTLI SO PRESENT" || echo "BROTLI SO MISSING (pure-python fallback!)"
+          # extract and lipo + load test
+          mkdir -p /tmp/whx
+          "$PY" -m zipfile -e "$WHL" /tmp/whx
+          SO=$(find /tmp/whx -name '_brotli*.so' | head -1)
+          echo "SO=$SO"
+          if [ -n "$SO" ]; then
+            lipo -info "$SO" || file "$SO"
+            "$PY" -c "import importlib.util as u; s=u.spec_from_file_location('_brotli', '$SO'); m=u.module_from_spec(s); s.loader.exec_module(m); print('BROTLI LOADED OK', [x for x in dir(m) if not x.startswith('__')][:10])" && echo "LOAD OK" || echo "LOAD FAILED"
+          fi
+
+      - name: Upload artifacts (logs + wheels)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cp34-spike-output
+          if-no-files-found: warn
+          path: |
+            wheelhouse/**
+            /tmp/pyenv-3410.log
+            /tmp/raw-configure.log
+            /tmp/raw-make.log
+            /tmp/raw-install.log
+            /tmp/wheel-build.log
