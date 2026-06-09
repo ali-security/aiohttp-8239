@@ -18,7 +18,6 @@ jobs:
         run: |
           set -x
           uname -a; sw_vers || true; clang --version; xcrun --show-sdk-path; xcrun --show-sdk-version
-          brew --prefix zlib 2>/dev/null || true
 
       - name: Ensure zlib headers (brew)
         run: |
@@ -27,14 +26,12 @@ jobs:
           ls -la "$(brew --prefix zlib)/include" "$(brew --prefix zlib)/lib"
 
       - name: Build CPython 3.4.10 from source (x86_64, WITH zlib)
-        id: rawbuild
         run: |
           set -x
           cd /tmp
           curl -sSLO https://www.python.org/ftp/python/3.4.10/Python-3.4.10.tgz
           tar xzf Python-3.4.10.tgz
           cd Python-3.4.10
-          # getentropy needs <sys/random.h> on clang16+ (else implicit-decl hard error)
           if ! grep -q 'sys/random.h' Python/random.c; then
             perl -0pi -e 's{#include "Python.h"}{#include "Python.h"\n#include <sys/random.h>}' Python/random.c || true
           fi
@@ -47,10 +44,9 @@ jobs:
           export CPATH="$ZP/include:$SDK/usr/include"
           export LIBRARY_PATH="$ZP/lib:$SDK/usr/lib"
           export ARCHFLAGS="-arch x86_64"
-          ./configure --prefix=/tmp/py34 --enable-shared --without-ensurepip MACOSX_DEPLOYMENT_TARGET=10.10 2>&1 | tee /tmp/raw-configure.log
-          make -j"$(sysctl -n hw.ncpu)" 2>&1 | tee /tmp/raw-make.log
-          make install 2>&1 | tee /tmp/raw-install.log
-          # surface the optional-modules report
+          ./configure --prefix=/tmp/py34 --enable-shared --without-ensurepip MACOSX_DEPLOYMENT_TARGET=10.10 >/tmp/raw-configure.log 2>&1
+          make -j"$(sysctl -n hw.ncpu)" >/tmp/raw-make.log 2>&1
+          make install >/tmp/raw-install.log 2>&1
           grep -nE 'necessary bits|Failed to build|zlib' /tmp/raw-make.log || true
 
       - name: Verify python has zlib + DEFLATE
@@ -59,75 +55,62 @@ jobs:
           set -x
           PY=/tmp/py34/bin/python3.4
           export DYLD_LIBRARY_PATH=/tmp/py34/lib
-          [ -x "$PY" ] || { echo "NO PYTHON"; echo "py=" >> "$GITHUB_OUTPUT"; exit 1; }
           "$PY" -c "import sys,platform;print(sys.version);print(platform.machine())"
           "$PY" -c "import zlib;print('zlib OK',zlib.ZLIB_VERSION)"
           "$PY" -c "import zipfile;zipfile._check_compression(zipfile.ZIP_DEFLATED);print('DEFLATE OK')"
-          file "$PY"
           echo "py=$PY" >> "$GITHUB_OUTPUT"
 
-      - name: Pre-fetch build deps
-        if: steps.findpy.outputs.py != ''
+      - name: Build deps + aiohttp wheel
         run: |
           set -x
+          PY="${{ steps.findpy.outputs.py }}"
+          export DYLD_LIBRARY_PATH=/tmp/py34/lib
           mkdir -p /tmp/wh; cd /tmp/wh
           curl -sSLO https://files.pythonhosted.org/packages/6b/6a/fa8d20fb8b661854a7140e290c52693ab3e8afdc9a8a7bf1194d9a227918/Cython-0.27.1-cp34-cp34m-macosx_10_6_intel.macosx_10_9_intel.macosx_10_9_x86_64.macosx_10_10_intel.macosx_10_10_x86_64.whl
           curl -sSLO https://files.pythonhosted.org/packages/91/af/18d58ed8a8e7e6b91d71b0367034faf8ea41e1004018811388ed07a7f2d6/setuptools-43.0.0-py2.py3-none-any.whl
           curl -sSLO https://files.pythonhosted.org/packages/0c/80/16a85b47702a1f47a63c104c91abdd0a6704ee8ae3b4ce4afc49bc39f9d9/wheel-0.30.0-py2.py3-none-any.whl
-          ls -la
-
-      - name: Install build deps into site-packages
-        if: steps.findpy.outputs.py != ''
-        run: |
-          set -x
-          PY="${{ steps.findpy.outputs.py }}"
-          export DYLD_LIBRARY_PATH=/tmp/py34/lib
           SP="$("$PY" -c 'import site;print(site.getsitepackages()[0])')"
-          cd /tmp/wh
           for w in *.whl; do "$PY" -m zipfile -e "$w" "$SP"; done
           "$PY" -c "import Cython,setuptools,wheel;print('Cython',Cython.__version__,'setuptools',setuptools.__version__,'wheel',wheel.__version__)"
-
-      - name: Build aiohttp wheel
-        id: wheel
-        if: steps.findpy.outputs.py != ''
-        run: |
-          set -x
-          PY="${{ steps.findpy.outputs.py }}"
-          export DYLD_LIBRARY_PATH=/tmp/py34/lib
+          cd "$GITHUB_WORKSPACE"
           export CFLAGS="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
           export ARCHFLAGS="-arch x86_64"
           export MACOSX_DEPLOYMENT_TARGET=10.10
-          "$PY" setup.py bdist_wheel -d "$GITHUB_WORKSPACE/wheelhouse" 2>&1 | tee /tmp/wheel-build.log
+          "$PY" setup.py bdist_wheel -d "$GITHUB_WORKSPACE/wheelhouse" >/tmp/wheel-build.log 2>&1
+          tail -5 /tmp/wheel-build.log
           ls -la "$GITHUB_WORKSPACE/wheelhouse"
 
-      - name: Verify .so (x86_64 + dep-free load) and retag 10_10/10_11
-        id: verify
-        if: steps.findpy.outputs.py != ''
+      - name: Verify .so (x86_64 + dep-free load, py34 API)
         run: |
           set -x
           PY="${{ steps.findpy.outputs.py }}"
           export DYLD_LIBRARY_PATH=/tmp/py34/lib
-          WHL=$(ls "$GITHUB_WORKSPACE"/wheelhouse/aiohttp-*.whl 2>/dev/null | head -1)
+          WHL=$(ls "$GITHUB_WORKSPACE"/wheelhouse/aiohttp-*.whl | head -1)
           echo "WHL=$WHL"
-          [ -z "$WHL" ] && { echo "NO WHEEL"; exit 1; }
-          echo "=== wheel contents ==="
-          "$PY" -m zipfile -l "$WHL"
-          "$PY" -m zipfile -l "$WHL" | grep -E '_vendored/_brotli.*\.so' && echo "BROTLI SO PRESENT" || { echo "BROTLI SO MISSING"; exit 1; }
+          "$PY" -m zipfile -l "$WHL" | grep -E '_vendored/_brotli.*\.so' && echo "BROTLI SO PRESENT"
           mkdir -p /tmp/whx; "$PY" -m zipfile -e "$WHL" /tmp/whx
           SO=$(find /tmp/whx -name '_brotli*.so' | head -1)
-          echo "SO=$SO"
-          lipo -info "$SO"
-          lipo -info "$SO" | grep -qE 'Non-fat.*x86_64|is architecture: x86_64' && echo "ARCH x86_64 OK" || echo "ARCH CHECK note (see lipo above)"
-          "$PY" -c "import importlib.util as u;s=u.spec_from_file_location('_brotli','$SO');m=u.module_from_spec(s);s.loader.exec_module(m);print('BROTLI LOADED OK',[x for x in dir(m) if not x.startswith('__')][:12])"
+          echo "SO=$SO"; lipo -info "$SO"
+          # Python 3.4-compatible dep-free extension load (module_from_spec is 3.5+)
+          "$PY" -c "from importlib.machinery import ExtensionFileLoader; m=ExtensionFileLoader('_brotli','$SO').load_module(); print('BROTLI LOADED OK', [x for x in dir(m) if not x.startswith('__')][:12])"
           echo "LOAD OK"
-          # Retag to 10_10 (rename) then add 10_11
+
+      - name: Retag to two separate wheels (10_10 and 10_11)
+        run: |
+          set -x
           /usr/bin/python3 -m pip install --user --quiet wheel
-          /usr/bin/python3 -m wheel tags --platform-tag macosx_10_10_x86_64 --remove "$WHL"
-          NEW=$(ls "$GITHUB_WORKSPACE"/wheelhouse/aiohttp-*macosx_10_10_x86_64.whl 2>/dev/null | head -1)
-          echo "10_10: $NEW"
-          /usr/bin/python3 -m wheel tags --platform-tag macosx_10_11_x86_64 "$NEW"
+          WD="$GITHUB_WORKSPACE/wheelhouse"
+          SRC="$WD/$(ls "$WD" | grep '^aiohttp-.*\.whl$' | head -1)"
+          echo "src=$SRC"
+          # The source wheel is already tagged macosx_10_10_x86_64 -> keep it as the 10_10 deliverable.
+          # Build the 10_11 deliverable from a copy in an isolated dir so wheel-tags output is unambiguous.
+          mkdir -p /tmp/r11; cp "$SRC" /tmp/r11/
+          C="/tmp/r11/$(basename "$SRC")"
+          OUT=$(/usr/bin/python3 -m wheel tags --platform-tag macosx_10_11_x86_64 --remove "$C")
+          echo "wheel-tags output: $OUT"
+          cp /tmp/r11/aiohttp-*macosx_10_11_x86_64.whl "$WD"/
           echo "=== final wheelhouse ==="
-          ls -la "$GITHUB_WORKSPACE/wheelhouse"
+          ls -la "$WD"
 
       - name: Upload artifacts
         if: always()
