@@ -86,15 +86,20 @@ curl -sSLO https://files.pythonhosted.org/packages/91/af/18d58ed8a8e7e6b91d71b03
 curl -sSLO https://files.pythonhosted.org/packages/0c/80/16a85b47702a1f47a63c104c91abdd0a6704ee8ae3b4ce4afc49bc39f9d9/wheel-0.30.0-py2.py3-none-any.whl
 SP="$("$PY34" -c 'import site; print(site.getsitepackages()[0])')"
 for w in *.whl; do "$PY34" -m zipfile -e "$w" "$SP"; done
-rm -rf /tmp/wh34; cd "$SRC"; rm -rf build
-CFLAGS="$DEMOTE" ARCHFLAGS="-arch x86_64" MACOSX_DEPLOYMENT_TARGET=10.10 "$PY34" setup.py bdist_wheel -d /tmp/wh34
-# setup.py silently falls back to a pure-Python wheel if an extension fails to build — assert the .so is in
-"$PY34" -m zipfile -l /tmp/wh34/*.whl | grep -q '_vendored/_brotli.*\.so'
-norm_record /tmp/wh34/*.whl
-cp /tmp/wh34/*.whl "$OUT/"                       # bdist auto-tags macosx_10_10
-mkdir -p /tmp/r11; cp /tmp/wh34/*.whl /tmp/r11/  # retag a copy to 10_11 (metadata only)
-"$RETAG_PY" -m wheel tags --platform-tag macosx_10_11_x86_64 --remove /tmp/r11/*.whl
-norm_record /tmp/r11/*macosx_10_11_x86_64.whl; mv /tmp/r11/*macosx_10_11_x86_64.whl "$OUT/"
+# build once per target so each wheel's Mach-O min-version matches its tag (and public)
+build_cp34() {
+  local TARGET="$1" T="${1//./_}"
+  rm -rf /tmp/wh34; cd "$SRC"; rm -rf build
+  CFLAGS="$DEMOTE -mmacosx-version-min=$TARGET" LDFLAGS="-mmacosx-version-min=$TARGET" \
+    ARCHFLAGS="-arch x86_64" MACOSX_DEPLOYMENT_TARGET="$TARGET" \
+    "$PY34" setup.py bdist_wheel -d /tmp/wh34
+  # setup.py silently falls back to a pure-Python wheel if an extension fails — assert the .so is in
+  "$PY34" -m zipfile -l /tmp/wh34/*.whl | grep -q '_vendored/_brotli.*\.so'
+  "$RETAG_PY" -m wheel tags --platform-tag "macosx_${T}_x86_64" --remove /tmp/wh34/*.whl
+  norm_record /tmp/wh34/*.whl; mv /tmp/wh34/*.whl "$OUT/"
+}
+build_cp34 10.10
+build_cp34 10.11
 
 echo "=== built into $OUT ==="
 ls -la "$OUT"/*macosx*.whl
