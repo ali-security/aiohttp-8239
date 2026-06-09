@@ -1,0 +1,60 @@
+name: spike-macos-cp34
+# THROWAWAY: cp34 for aiohttp 2.3.9 (fork branch cve-2025-69223-vendored-brotli).
+# Same conda route as cp35 — conda-forge python 3.4.5 (x86_64), era recipe.
+# Defensive get-pip 3.4 (conda's bundled 3.4 pip may be too old for PyPI TLS).
+on:
+  push:
+    branches: [spike/macos-cp34]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    steps:
+      - name: Checkout (patched aiohttp 2.3.9 fork branch)
+        uses: actions/checkout@v4
+
+      - name: Environment dump
+        run: |
+          set -x
+          sw_vers; clang --version; uname -m
+
+      - name: Conda python 3.4 + build cp34 wheel (one step)
+        env:
+          CFLAGS: "-Wno-error=implicit-function-declaration -Wno-error=implicit-int"
+          ARCHFLAGS: "-arch x86_64"
+          MACOSX_DEPLOYMENT_TARGET: "10.10"
+        run: |
+          set -euxo pipefail
+          curl -fsSL -o mf.sh https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-MacOSX-x86_64.sh
+          bash mf.sh -b -p "$HOME/mf"
+          source "$HOME/mf/etc/profile.d/conda.sh"
+          conda create -y -n py34 -c conda-forge python=3.4.5
+          conda activate py34
+          echo "=== CRUCIAL: does conda 3.4 run on macOS 15? ==="
+          python --version
+          python -c "import platform; print('ok', platform.python_version(), platform.machine())"
+          echo "=== ensure a PyPI-capable pip (conda 3.4 pip may be too old) ==="
+          curl -fsSLO https://bootstrap.pypa.io/pip/3.4/get-pip.py
+          python get-pip.py
+          python -m pip install 'cython==0.27.1' 'wheel==0.30.0' 'setuptools<44'
+          echo "=== build ==="
+          python setup.py bdist_wheel -d wheelhouse
+          ls -la wheelhouse/
+          echo "=== inspect ==="
+          W=$(ls wheelhouse/*.whl | head -1)
+          unzip -l "$W" | grep -E "dist-info/" || true
+          unzip -p "$W" "aiohttp-2.3.9.dist-info/WHEEL" || true
+          rm -rf /tmp/wh && mkdir -p /tmp/wh && (cd /tmp/wh && unzip -o "$GITHUB_WORKSPACE/$W" >/dev/null)
+          SO=$(ls /tmp/wh/aiohttp/_vendored/_brotli*.so)
+          echo "== .so archs =="; lipo -info "$SO" || file "$SO"
+          echo "=== runtime .so load on cp34 ==="
+          python -c "import importlib.util as u; s=u.spec_from_file_location('_brotli', '$SO'); m=u.module_from_spec(s); s.loader.exec_module(m); print('vendored _brotli loaded OK on cp34:', m); print('api:', [a for a in dir(m) if not a.startswith('__')])"
+
+      - name: Upload wheel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aiohttp-239-cp34-macos
+          path: wheelhouse/*.whl
+          if-no-files-found: warn
