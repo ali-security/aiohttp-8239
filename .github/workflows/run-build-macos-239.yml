@@ -1,0 +1,22 @@
+name: run-build-macos-239
+on:
+  push:
+    branches: [build/macos-real]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build via build_macos.sh
+        run: SOURCE="$PWD" OUT="$PWD/build_output" bash build_macos.sh
+      - name: List
+        if: always()
+        run: ls -la build_output/ || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aiohttp-2.3.9-macos
+          path: build_output/*macosx*.whl
+          if-no-files-found: warn
